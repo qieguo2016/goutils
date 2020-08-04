@@ -55,6 +55,7 @@ type Window struct {
 	oldest         int
 	latest         int
 	bucketDuration time.Duration
+	bucketNum      int
 
 	// 定时更新
 	ticker    *time.Ticker
@@ -76,11 +77,12 @@ func NewWindow() *Window {
 func NewWindowWithOption(bucketDuration time.Duration, bucketNum int) *Window {
 	w := &Window{
 		mutex:          sync.RWMutex{},
-		buckets:        make([]bucket, bucketNum+1),
+		buckets:        make([]bucket, bucketNum+2), // +2保证不重叠
 		oldest:         0,
 		latest:         0,
 		firstTrip:      true,
 		bucketDuration: bucketDuration,
+		bucketNum:      bucketNum,
 		ticker:         time.NewTicker(bucketDuration),
 	}
 	go w.autoLoad()
@@ -110,18 +112,19 @@ func (w *Window) refresh() {
 	w.preFail += w.buckets[w.latest].FailCount()
 	w.preTimeout += w.buckets[w.latest].TimeoutCount()
 	w.latest++
+	if w.firstTrip && w.latest >= w.bucketNum {
+		w.firstTrip = false
+	}
 	if w.latest >= len(w.buckets) {
 		w.latest -= len(w.buckets)
-		if w.firstTrip {
-			w.firstTrip = false
-		}
 	}
+	w.buckets[w.latest].Reset() // 新bucket归零
 
 	// oldest向前
-	w.preSuccess -= w.buckets[w.oldest].SuccessCount()
-	w.preFail -= w.buckets[w.oldest].FailCount()
-	w.preTimeout -= w.buckets[w.oldest].TimeoutCount()
 	if !w.firstTrip {
+		w.preSuccess -= w.buckets[w.oldest].SuccessCount()
+		w.preFail -= w.buckets[w.oldest].FailCount()
+		w.preTimeout -= w.buckets[w.oldest].TimeoutCount()
 		w.oldest++
 		if w.oldest >= len(w.buckets) {
 			w.oldest -= len(w.buckets)
@@ -172,21 +175,29 @@ func (w *Window) TimeoutCount() int64 {
 // SuccessRate = success / total
 func (w *Window) SuccessRate() float32 {
 	w.mutex.RLock()
+	defer w.mutex.RUnlock()
 	succ := w.buckets[w.latest].SuccessCount() + w.preSuccess
 	fail := w.buckets[w.latest].FailCount() + w.preFail
 	timeout := w.buckets[w.latest].TimeoutCount() + w.preTimeout
-	ret := float32(succ) / float32(succ+fail+timeout)
-	w.mutex.RUnlock()
+	total := succ + fail + timeout
+	if total == 0 {
+		return float32(0)
+	}
+	ret := float32(succ) / float32(total)
 	return ret
 }
 
 // ErrorRate = (fail + timeout) / total
 func (w *Window) ErrorRate() float32 {
 	w.mutex.RLock()
+	defer w.mutex.RUnlock()
 	succ := w.buckets[w.latest].SuccessCount() + w.preSuccess
 	fail := w.buckets[w.latest].FailCount() + w.preFail
 	timeout := w.buckets[w.latest].TimeoutCount() + w.preTimeout
-	ret := float32(fail+timeout) / float32(succ+fail+timeout)
-	w.mutex.RUnlock()
+	total := succ + fail + timeout
+	if total == 0 {
+		return float32(0)
+	}
+	ret := float32(fail+timeout) / float32(total)
 	return ret
 }
